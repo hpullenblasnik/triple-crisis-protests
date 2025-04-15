@@ -1,0 +1,409 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+# DATA SETUP
+
+```{r setup, include=F}
+library(tidyverse)
+library(sandwich)
+library(lubridate)
+library(ggplot2)
+library(plotly)
+library(psych)
+library(car)
+library(MASS)
+library(pscl)
+library(stargazer)
+library(modelsummary)
+library(sensemakr)
+
+options(scipen=999)
+
+data_folder <- "datasets/"
+out_folder <- "output/"
+```
+
+```{r}
+model_df <- read.csv(paste0(out_folder, "model_df.csv"), stringsAsFactors = F)
+filter_df <- read.csv(paste0(out_folder, "filter_df.csv"), stringsAsFactors = F) %>%
+  mutate(factor_actions=as.factor(any_old_actions), factor_nonblm_actions=as.factor(any_old_nonblm_actions))
+```
+
+Robust standard errors formula
+
+```{r}
+# For creating CI plots of coefs 
+ses <- function(model) { 
+  cov <- vcovHC(model, type="HC3")
+  std.err <- sqrt(diag(cov))
+  q.val <- qnorm(0.975)
+  r.est <- as_tibble(cbind(
+    estimate = coef(model), 
+    robust_se = std.err, 
+    z = (coef(model)/std.err), 
+    "Pr(>|z|) "= 2 * pnorm(abs(coef(model)/std.err), lower.tail = FALSE), 
+    LL = coef(model) - q.val  * std.err, 
+    UL = coef(model) + q.val  * std.err
+  ), rownames="coef_name")
+  
+  return(r.est)
+}
+```
+
+
+#####################################
+# TABLE 1: DESC STATS
+#####################################
+
+```{r, results='asis'}
+filter_df %>% 
+  dplyr::select(any_blm_actions, any_nonblm_actions, any_lockdown_actions, #blm_attendees, 
+                            blm_attendees_p10k, nonblm_attendees_p10k, lockdown_attendees_p10k,
+                            emp_scaled, covid_deaths_1k,killed_black, 
+                            any_old_actions, any_old_nonblm_actions,
+                            pop_1k, density_1k, trump_pct, pct_unemployed, pct_black, 
+                            pct_black_unemp, pct_black_ilf, 
+                            pct_bachelors, pct_bach_higher, pct_bach_higher_o25,
+                            essential_worker, pct_enroll
+                ) %>% as.data.frame() %>% 
+  stargazer(summary=T, type= "html", #"text", 
+          digits=2, summary.stat=c("mean", "sd", "median", "min", "max", "n"), out="visuals/descstats.html")
+```
+
+#### Population Weighted
+
+```{r}
+filter_df %>% 
+  mutate(
+    wt_tot=total_pop/sum(total_pop, na.rm=T)
+  ) %>%
+  summarize_at(vars(pct_unemployed, pct_black, essential_worker, trump_pct, pct_bachelors, pct_bach_higher, pct_pop20_24, pct_enroll), ~weighted.mean(., wt_tot, na.rm=T))
+
+filter_df %>% 
+  mutate(wt_ilf=laborforce/sum(laborforce, na.rm=T)) %>%
+  summarize_at(vars(pct_unemployed, essential_worker), ~weighted.mean(., wt_ilf, na.rm=T))
+
+filter_df %>% 
+  mutate(wt_25=pop_o25/sum(pop_o25, na.rm=T)) %>%
+  summarize_at(vars(pct_bach_higher_o25), ~weighted.mean(., wt_25, na.rm=T))
+  
+filter_df %>% 
+  mutate(wt_bl_lf=black_lf/sum(black_lf, na.rm=T)) %>%
+  summarize_at(vars(pct_black_ilf, pct_black_unemp), ~weighted.mean(., wt_bl_lf, na.rm=T))
+```
+
+
+
+
+#####################################
+# REGRESSION ANALYSIS
+#####################################
+
+
+```{r}
+raw_blm <- "blm_attendees ~ "
+log_blm <-  "log_blm ~ "
+
+raw_lockdown <- "lockdown_attendees ~ "
+log_lockdown <- "log_lockdown ~ " 
+
+base <- "emp_scaled + covid_deaths_1k"
+inter <- "emp_scaled*covid_deaths_1k"
+
+covars_blm <- " + pop_1k + density_1k + trump_pct + pct_unemployed + pct_black + pct_black_unemp + pct_black_ilf + killed_black + pct_bach_higher_o25 + pct_enroll + essential_worker + factor_actions"
+
+covars_nonblm <- " + pop_1k + density_1k + trump_pct + pct_unemployed + pct_black + pct_black_unemp + pct_black_ilf + killed_black + pct_bach_higher_o25 + pct_enroll + essential_worker  + factor_nonblm_actions"
+
+# for comparison models
+offset <- "+ offset(log(total_pop))"
+```
+
+#####################################
+# TABLE 2: LOGISTIC REGRESSION - ANY BLM PROTESTS
+#####################################
+
+```{r}
+act_blm_raw <- glm(formula(paste0("any_blm_actions ~ ", base)), data=filter_df, family="binomial")
+i_act_blm_raw <- glm(formula(paste0("any_blm_actions ~ ", inter)), data=filter_df, family="binomial")
+
+act_blm_full <- glm(formula(paste0("any_blm_actions ~ ", base, covars_blm)), data=filter_df, family="binomial")
+i_act_blm_full <- glm(formula(paste0("any_blm_actions ~ ", inter, covars_blm)), data=filter_df, family="binomial")
+```
+
+Any BLM protest (raw, full): We see significant and positive relationship (0.089, 0.062, 0.070)
+
+```{r}
+modelsummary(
+  list(act_blm_raw, i_act_blm_raw, act_blm_full, i_act_blm_full), 
+  stars=T, fmt="%.3f", coef_rename = coef_rename, output="flextable", 
+  title="Logistic Regression on Any BLM Actions")
+```
+
+Write out table:
+
+```{r}
+covar_list=c("Employment Loss (%)", "Covid-19 Deaths (000s)", "Employment x Covid", 
+             "Population (000s)", "Population Density (000s)", "Voted Trump 2016 (%)", 
+             "Unemployed (%)", "Black (%)", "Black Unemployed (%)", "Black in Labor Force (%)", 
+             "Black People Killed by Police", "Bachelor’s Degree or Higher (%)", 
+             "University Enrollment (%)", "Essential Worker (%)", "Any Previous BLM Protest")
+```
+
+
+```{r, results='asis'}
+stargazer(act_blm_raw, i_act_blm_raw, act_blm_full, i_act_blm_full,
+  type="html", 
+  star.cutoffs = c(0.05, 0.01, 0.001), digits=3, header = FALSE,
+  notes = c(" * p<0.05; ** p<0.01; *** p<0.001"), notes.append = FALSE, 
+  column.labels = NULL, dep.var.labels=c("Any BLM Protests", "Any BLM Protests", "Any BLM Protests", "Any BLM Protests"),
+  covariate.labels=covar_list,
+  out="visuals/logistic_blm.html")
+```
+
+
+#####################################
+# TABLE 3: LOG-LINEAR REGRESSION -BLM PROTEST ATTENDANCE
+#####################################
+
+# LINEAR REGRESSION ANALYSIS
+
+```{r}
+blm_raw <- lm(formula(paste0(log_blm, base)), data=filter_df)
+blm_full <- lm(formula(paste0(log_blm, base, covars_blm)), data=filter_df)
+
+i_blm_raw <- lm(formula(paste0(log_blm, inter)), data=filter_df)
+i_blm_full <- lm(formula(paste0(log_blm, inter, covars_blm)), data=filter_df)
+```
+
+
+```{r}
+modelsummary(
+  list(blm_raw, i_blm_raw, blm_full, i_blm_full), 
+  stars=T, fmt="%.3f", coef_rename = coef_rename, output="flextable",
+  title=paste0("Linear Regression ", log_blm)
+)
+```
+
+Write out table: 
+```{r, results='asis'}
+stargazer(
+  blm_raw, i_blm_raw, blm_full, i_blm_full,
+  type="html", 
+  star.cutoffs = c(0.05, 0.01, 0.001), digits=3, header = FALSE,
+  notes = c(" * p<0.05; ** p<0.01; *** p<0.001"), notes.append = FALSE, 
+  column.labels = NULL, dep.var.labels=c("", "", "", ""),
+  covariate.labels=covar_list,
+  out="visuals/loglin_blm.html")
+```
+
+
+#####################################
+# APPENDIX TABLE A: LOCKDOWN & NON-BLM PROTEST OCCURRENCE
+#####################################
+
+## ANY PROTESTS: Comparison to lockdown and non-blm protests
+
+Only significant relationship is BLM, others are 0 and not sig
+
+```{r}
+act_lockdown <- glm(formula(paste0("any_lockdown_actions ~ ", base, covars_nonblm)), data=filter_df, family="binomial")
+i_act_lockdown <- glm(formula(paste0("any_lockdown_actions ~ ", inter, covars_nonblm)), data=filter_df, family="binomial")
+act_nonblm <- glm(formula(paste0("any_nonblm_actions ~ ", base, covars_nonblm)), data=filter_df, family="binomial")
+i_act_nonblm <- glm(formula(paste0("any_nonblm_actions ~ ", inter, covars_nonblm)), data=filter_df, family="binomial")
+```
+
+
+```{r}
+modelsummary(
+  list(act_lockdown, i_act_lockdown, act_nonblm, i_act_nonblm), 
+  stars=T, fmt="%.3f", coef_rename = coef_rename, output="flextable", 
+  title="Logistic Regression Across Action Types")
+```
+
+```{r}
+nonblm_covar_list <- c("Employment Loss (%)", "Covid-19 Deaths (000s)", 
+                       "Population (000s)", "Population Density (000s)", 
+                       "Voted Trump 2016 (%)", "Unemployed (%)", "Black (%)", 
+                       "Black Unemployed (%)", "Black in Labor Force (%)", 
+                       "Black People Killed by Police", "Bachelor’s Degree or Higher (%)", 
+                       "University Enrollment (%)", "Essential Worker (%)", 
+                       "Any Previous Non-BLM Protest", "Employment x Covid")
+```
+
+
+```{r}
+stargazer(act_lockdown, i_act_lockdown, act_nonblm, i_act_nonblm, 
+  type="html", 
+  star.cutoffs = c(0.05, 0.01, 0.001), digits=3, header = FALSE,
+  notes = c(" * p<0.05; ** p<0.01; *** p<0.001"), notes.append = FALSE, 
+  covariate.labels = nonblm_covar_list,
+  out="visuals/logistic_nonblm.html")
+```
+
+
+#####################################
+# FIGURE 1: EMPLOYMENT COMPARE ACROSS OUTCOMES - OCCURRENCE
+#####################################
+
+```{r}
+ggplot(
+  ses(act_blm_full) %>% mutate(dev_var="BLM") %>%
+    bind_rows(ses(act_nonblm) %>% mutate(dev_var="Anti-Lockdown")) %>%
+    bind_rows(ses(act_lockdown) %>% mutate(dev_var="Non-BLM")) %>%
+    mutate(cRR=(exp(estimate)-1)*100, cLL=(exp(LL)-1)*100, cUL=(exp(UL)-1)*100) %>%
+    mutate(dev_var=factor(dev_var, levels=c("BLM", "Anti-Lockdown", "Non-BLM"))) %>% 
+    filter(coef_name %in% c("emp_scaled")), 
+  aes(x=dev_var, y=cRR)) +
+  geom_point(position=position_dodge(width=0.05)) +
+  geom_errorbar(aes(ymin=cLL, ymax=cUL), width=0.05, position=position_dodge(width=0.05)) +
+  theme_classic() +
+  geom_hline(yintercept=0, linetype="dashed", color="grey50") +
+  labs(x="Protest Type", y="% Change in Odds of A Protest") + 
+  theme(legend.position = "none", text=element_text(size=14, family="Times New Roman"))
+```
+
+```{r}
+ses(i_act_blm_full) %>% mutate(dev_var="BLM") %>%
+    bind_rows(ses(i_act_nonblm) %>% mutate(dev_var="Anti-Lockdown")) %>%
+    bind_rows(ses(i_act_lockdown) %>% mutate(dev_var="Non-BLM")) %>%
+  filter(coef_name %in% c("emp_scaled", "emp_scaled:covid_deaths_1k")) %>%
+  group_by(dev_var) %>%
+  summarize_at(vars(estimate, LL, UL), ~sum(., na.rm=T)) %>%
+  mutate(cRR=(exp(estimate)-1)*100, cLL=(exp(LL)-1)*100, cUL=(exp(UL)-1)*100,
+         dev_var=factor(dev_var, levels=c("BLM", "Anti-Lockdown", "Non-BLM")))
+```
+
+#####################################
+# APPENDIX TABLE B: LOCKDOWN & NON-BLM PROTEST ATTENDANCE
+#####################################
+
+```{r}
+nonblm_full <- lm(formula(paste0("log(nonblm_attendees_p10k + 1) ~ ", base, covars_nonblm)), data=filter_df)
+lockdown_full <- lm(formula(paste0(log_lockdown, base, covars_nonblm)), data=filter_df)
+
+i_nonblm_full <- lm(formula(paste0("log(nonblm_attendees_p10k + 1) ~ ", inter, covars_nonblm)), data=filter_df)
+i_lockdown_full <- lm(formula(paste0(log_lockdown, inter, covars_nonblm)), data=filter_df)
+```
+
+
+```{r}
+modelsummary(
+  list(nonblm_full, i_nonblm_full, lockdown_full, i_lockdown_full), 
+  stars=T, fmt="%.4f", coef_rename = coef_rename, output="flextable",
+  title=paste0("Lockdown Comparison ", log_blm)
+)
+```
+
+```{r, results='asis'}
+stargazer(
+  lockdown_full, i_lockdown_full, nonblm_full, i_nonblm_full, 
+  type="html", 
+  star.cutoffs = c(0.05, 0.01, 0.001), digits=3, header = FALSE,
+  notes = c(" * p<0.05; ** p<0.01; *** p<0.001"), notes.append = FALSE, 
+  covariate.labels = nonblm_covar_list,
+  out="visuals/loglin_nonblm.html")
+```
+
+
+#####################################
+# FIGURE 2: EMPLOYMENT COMPARE ACROSS OUTCOMES - ATTENDANCE
+#####################################
+
+```{r}
+ggplot(
+  ses(blm_full) %>% mutate(dev_var="BLM") %>%
+    bind_rows(ses(lockdown_full) %>% mutate(dev_var="Anti-Lockdown")) %>%
+    bind_rows(ses(nonblm_full) %>% mutate(dev_var="Non-BLM")) %>%
+    mutate(cRR=(exp(estimate)-1)*100, cLL=(exp(LL)-1)*100, cUL=(exp(UL)-1)*100) %>%
+    mutate(dev_var=factor(dev_var, levels=c("BLM", "Anti-Lockdown", "Non-BLM"))) %>% 
+    filter(coef_name=="emp_scaled"),
+  aes(x=dev_var, y=cRR)) +
+  geom_point(position=position_dodge(width=0.05)) +
+  geom_errorbar(aes(ymin=cLL, ymax=cUL), width=0.05, position=position_dodge(width=0.05)) +
+  theme_classic() +
+  geom_hline(yintercept=0, linetype="dashed", color="grey50") +
+  labs(x="Protest Type", y="% Change in Rate of Protest Attendance") + 
+  theme(legend.position = "none", text=element_text(size=14, family="Times New Roman"))
+```
+
+#####################################
+# FIGURE 2: COVID COMPARE ACROSS OUTCOMES
+#####################################
+
+
+```{r}
+ggplot(
+  ses(act_blm_full) %>% mutate(dev_var="BLM") %>%
+    bind_rows(ses(act_nonblm) %>% mutate(dev_var="Anti-Lockdown")) %>%
+    bind_rows(ses(act_lockdown) %>% mutate(dev_var="Non-BLM")) %>%
+    mutate(cRR=(exp(estimate)-1)*100, cLL=(exp(LL)-1)*100, cUL=(exp(UL)-1)*100) %>%
+    mutate(dev_var=factor(dev_var, levels=c("BLM", "Anti-Lockdown", "Non-BLM"))) %>% 
+    filter(coef_name %in% c("covid_deaths_1k")),
+  aes(x=dev_var, y=cRR)) +
+  geom_point(position=position_dodge(width=0.05)) +
+  geom_errorbar(aes(ymin=cLL, ymax=cUL), width=0.05, position=position_dodge(width=0.05)) +
+  theme_classic() +
+  geom_hline(yintercept=0, linetype="dashed", color="grey50") +
+  labs(x="Protest Type", y="% Change in Odds of A Protest") + 
+  theme(legend.position = "none", text=element_text(size=14, family="Times New Roman"))
+```
+
+```{r}
+ggplot(
+  ses(blm_full) %>% mutate(dev_var="BLM") %>%
+    bind_rows(ses(lockdown_full) %>% mutate(dev_var="Anti-Lockdown")) %>%
+    bind_rows(ses(nonblm_full) %>% mutate(dev_var="Non-BLM")) %>%
+    mutate(cRR=(exp(estimate)-1)*100, cLL=(exp(LL)-1)*100, cUL=(exp(UL)-1)*100) %>%
+    mutate(dev_var=factor(dev_var, levels=c("BLM", "Anti-Lockdown", "Non-BLM"))) %>% 
+    filter(coef_name=="covid_deaths_1k"),
+  aes(x=dev_var, y=cRR)) +
+  geom_point(position=position_dodge(width=0.05)) +
+  geom_errorbar(aes(ymin=cLL, ymax=cUL), width=0.05, position=position_dodge(width=0.05)) +
+  theme_classic() +
+  geom_hline(yintercept=0, linetype="dashed", color="grey50") +
+  labs(x="Protest Type", y="% Change in Rate of Protest Attendance") + 
+  theme(legend.position = "none", text=element_text(size=14, family="Times New Roman"))
+```
+
+
+#####################################
+# TABLE C: ALTERNATE MODELS
+#####################################
+
+Results are very consistent across the log-linear, poisson, and quasipoisson models. The ones for poisson and qpois are ever so slightly larger, but not in a way that makes a difference.
+
+```{r}
+pois_blm <- glm(formula(paste0(raw_blm, base, covars_blm, offset)), data=filter_df, family="poisson")
+qpois_blm <- glm(formula(paste0(raw_blm, base, covars_blm, offset)), data=filter_df, family="quasipoisson")
+
+i_pois_blm <- glm(formula(paste0(raw_blm, inter, covars_blm, offset)), data=filter_df, family="poisson")
+i_qpois_blm <- glm(formula(paste0(raw_blm, inter, covars_blm, offset)), data=filter_df, family="quasipoisson")
+```
+
+
+```{r}
+modelsummary(
+  list(
+    "Log Linear"=blm_full, "Log Linear"=i_blm_full,
+    "Poisson"=pois_blm, "Poisson"=i_pois_blm,
+    "Quasipoisson"=qpois_blm, "Quasipoisson"=i_qpois_blm
+  ), 
+  stars=T, fmt="%.3f", coef_rename = coef_rename, output="flextable",
+  title=paste0("GLMs ", raw_blm, " with population offset")
+)
+```
+
+```{r, results='asis'}
+stargazer(
+  blm_full, i_blm_full, pois_blm, i_pois_blm, qpois_blm, i_qpois_blm,
+  type="html", 
+  star.cutoffs = c(0.05, 0.01, 0.001), digits=3, header = FALSE,
+  notes = c(" * p<0.05; ** p<0.01; *** p<0.001"), notes.append = FALSE, 
+  out="visuals/altmodels.html")
+```
+
+

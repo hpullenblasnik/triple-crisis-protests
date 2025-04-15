@@ -1,0 +1,443 @@
+---
+title: "Triple Crisis Analysis"
+author: "Hannah Pullen-Blasnik & Katy Habr"
+output: html_notebook
+---
+
+# Data Ingestion
+
+```{r setup, include=F}
+library(tidyverse)
+library(lubridate)
+library(tigris)
+
+options(scipen=999)
+
+data_folder <- "datasets/"
+out_folder <- "output/"
+
+start_protest <- ymd("2020-05-25")
+```
+
+### Lookup Table
+
+Starting from FIPS to CBSA crosswalk file
+
+```{r}
+xw <- read_csv(paste0(data_folder, "lookups/cbsa2fipsxw.csv")) %>% 
+  filter(!is.na(cbsacode)) %>%
+  mutate(fipscounty=paste0(fipsstatecode, fipscountycode),
+         cbsacode=str_pad(cbsacode, 5, "left", "0")) %>%
+  dplyr::select(cbsacode, csacode, fipscounty, cbsatitle, statename, centraloutlyingcounty, countycountyequivalent)
+```
+
+
+### Control Variables From ACS
+
+```{r}
+cbsa_df <- read_csv(paste0(data_folder, "acs.csv")) %>%
+  rename(Geo_CBSA=`Metropolitan and Micropolitan Statistical Area`, Geo_QName=`Qualifying Name`) %>%
+  mutate_at(vars(pct_food_service, pct_healthcare_support, pct_emp_retail, pct_black_unemp, pct_black, pct_bachelors, pct_unemployed, pct_black_ilf), ~.*100) %>%
+  mutate(essential_worker=pct_food_service + pct_occ_healthcare + pct_healthcare_support + pct_emp_retail,
+         pop_1k=total_pop/1000, 
+         density_1k=pop_density/1000,
+         pct_enroll=(tot_enrolled_cllege_gradschl/total_pop)*100,
+         pct_bach_higher_o25=(X25_over_bach_higher/over25)*100) %>%
+  dplyr::select(Geo_CBSA, Geo_QName, total_pop, pop_1k, pop_density,  
+                black_unemployed, pct_black, pct_bachelors, 
+                pct_unemployed, pct_black_ilf, pct_black_unemp, essential_worker,
+                over25, over16, laborforce, black_lf,
+                pct_enroll, pct_bach_higher_o25) %>%
+  mutate(Geo_CBSA=str_pad(Geo_CBSA, 5, "left", "0")) %>%
+  filter(str_detect(Geo_QName, "PR Metro Area|PR Micro Area", negate=T)) 
+```
+
+
+# Crowd Counting Consortium
+
+Raw download 8/13/2021:
+
+```{r}
+ccc <- read.csv(paste0(data_folder, "ccc.csv"), stringsAsFactors = F) %>% as_tibble()
+```
+
+Clean downloaded data
+
+```{r}
+ccc_clean <- ccc %>%
+  mutate(date=ymd(date), 
+         year=year(date), 
+         month=month(date), 
+         post_gf=date >= start_protest,
+         state=if_else(!is.na(resolved_state), resolved_state, state),
+         county=resolved_county,
+         fips=str_pad(fips_code, 5, "left", "0"),
+         event_id=row_number(),
+         blm=if_else(str_detect(str_to_lower(issues), "racism|antiracism|race|racial|black lives matter|blm|george floyd|police brutality|police reform|defund the police|police violence|policing|criminal justice|civil rights") |
+                       str_detect(str_to_lower(actors), "black lives matter"), T, F, missing=F),
+        lockdown=if_else(year>2019 & str_detect(issues, "covid") &
+                (str_detect(str_to_lower(claims), "protest shutdown|protest stay-at-home|protest economic shutdown|protest school closure|protest lack of school graduation ceremony|against ban|against strict coronavirus guidelines|against economic shutdown|against restrictions|against covid lockdown|against lockdown during coronavirus|against lockdown due to coronavirus|against mandatory mask|against curfew|against covid-related |against covid19 policy|against two-week emergency measures|against coronavirus mask|against mask mandate|against covid-19 mask|against covid-19 ordinance|against covid-19 restriction|against coronavirus mandates|against covid-related restriction|against covid 19 restriction|against covid mask mandate|against covid regulation|against coronavirus health mandates|against coronavirus restrictions|against coronavirus-related restrictions|against state coronavirus mandates|against state coronavirus restriction|against state restrictions|against state and local coronavirus shutdown|against state covid-related restrictions|against state stay-at-home|against state-mandated restrictions|against state-mandated closure|against state coronavirus stay-at-home|against state mask mandate|against state-mandated curfew|against state-mandated restrictions|against state coronavirus mask|against state public health orders|against government coronavirus mandates|against government coronavirus mask mandates|against government overreach|against covid-19 state of emergency|against governor's decision to shut down|against governor's mask|against governor's order|against county restrictions|against county-mandated bar closures|against county-mandated restrictions|against county mandates in response to coronavirus|against county public health restrictions|against county coronavirus|against county covid|against county decision to isolate|against county mask|against county measure|against county order|against county sign|against city restrictions|against city mask mandate|against city's mandatory mask|against city coronavirus mask|against city-mandated curfew|against city-mandated restrictions|agains coronavirus mask mandate|against 25-person cap|against a city law restricting gathering|against a city ordinance requiring use of masks|against city mandate on social distancing|against city stay-at-home|against district covid|against archbishop's decision|against vaccine mandates|against covid-19 vaccination mandate|against covid-19 vaccin|against covid vaccin|against coronavirus vaccin|against mandatory covid-19 vaccin|against calls for restaurants to check covid-19 vaccination|against city covid-19 vaccination|against city requiring proof of covid-19 vaccination|against cancellation|against cancelling|against postponing|against decision to postpone|against closing|against decision to cancel|against suspension of winter school sports|against canceling fall school|against remote schooling|against closure of|against online schooling|against shift to online|against switch to online|against changes to school graduation|against bar closure|against beach closure|against business closure|for allowing school sports|against cancellation of school sports|against distance learning|for allowing fall school football|for continuing school sports|resuming school|for reopening|for reopening school") | 
+                   str_detect(str_to_lower(claims), "for.* in-person school|for in-person|for in person|for the reopening of businesses|support business reopenings|for resum|continue during coronavirus|to ease covid restrictions|for easing coronavirus pandemic restrictions|for relaxation of covid-related restrictions|against columbia falls high school coronavirus mask mandate|against critical race theory and coronavirus mask mandates|against decision to delay re-opening|against decision to extend remote|against decision to keep schools closed|against suspension of fall school|against delay|against exclusion of|against extending state public health mandates|against extension of|against governor's business and event closures|against gym closures|against school district's decision to start school year online|for opening casinos|protest closure of summer camp|against state shutting down|against state coronavirus state of emergency|against state-mandate|against school closures|against mask requirement|protesting new shutdown|against fask mask|for lifting coronavirus-related|against plans for drive-through high school graduation|against plans for online school|against quarantine|against virtual format|call for the reopening|reopen gaming|against state coronavirus shutdown|against superintendent's recommendation to start school remotely|against virtual schooling|for state approval to reopen|not complying with county coronavirus mask|in support of an in-person education|in support of local businesses|for school sports to resume|against small business closures|against remote learning|against online school|against online-only school|against recommendations to withhold fall sports|against school board's decision to have all virtual learning|against school format of remote learning|against shut-down|against state coronavirus public health order|against state covid restrictions|against state-mandated closure|against the shutdown|against virtual|demanding to be able to perform in comedy clubs|for opening local pool|in protest of governor abbott's order to close bars|in support of reopening")) 
+                & 
+                !(str_detect(issues, "covid") & str_detect(str_to_lower(claims), "against.* plan for reopening school|against march for reopening school|against.* plan.* for in-person school|against premature return|opposed required in-person schooling|better protections against covid-19|better staffing ratios|delaying return to in-person schooling|more transparency and communication|safe return or no return|safe workplace for teachers|safer in-person school|safer working conditions|safer workplace|in support of teacher who challenged students|against cancellation of coronavirus vaccine clinic|against covid-related layoffs|against reopening schools|for reopening cases of Black men killed by police|calling for in person classes to be postponed|against ice|inmates")), 
+                     T, F, missing=F),
+         size_text=str_to_lower(size_text),
+         size_text_number=case_when(
+           size_text %in% c("fb: 1.8k going", "thousands") ~ 2000,
+           size_text %in% c("more than 1,200 bikers are expected") ~ 1200,
+           size_text %in% c("1000.0", "at least 1000", "fb: 109 going; fb: 959 going") ~ 1000,
+           size_text %in% c("between 700 and 800 vessels", "hope more than 1,000") ~ 800,
+           size_text %in% c("about 530 boats", "about 600 expected") ~ 600,
+           size_text %in% c("about 400 boats", "nearly 500", "several hundred") ~ 500,
+           size_text %in% c("at least 300 people were expected", "facebook: more than 300 interested", 
+                            "more than 300 expected") ~ 300,
+           size_text %in% c("200-300 total ralliers and detractors", "hoping [for] 300") ~ 250,
+           size_text %in% c("hundreds", "hundreds expected", "a huge crowd", "about 200", "fb: 192", 
+                            "hundreds combined with gilford event") ~ 200,
+           size_text=="170 major internet players" ~ 170,
+           size_text %in% c("150.0", "about 150 advocates") ~ 150,
+           size_text=="about 140" ~ 140,
+           size_text %in% c("about 100", "a large crowd", "large crowd", "several dozen", 
+                            "75 to 100 expected", "about 100 people", "close to 100", "over 100") ~ 100,
+           size_text %in% c("at least 70", "dense crowd", "fb: 65 going", "fb: 74 going") ~ 70,
+           size_text %in% c("a crowd", "many", "a large group", "large group", "dozens", "crowd", 
+                            "48 cars", "50-60 confederates", "a large cluster", 
+                            "a large number of people", "dozens of boats") ~ 50,
+           size_text %in% c("about 40", "a few dozen", "around 20-30 cars", "fb: 42", "fb: 43", 
+                            "more than 30 cars", "more than three dozen") ~ 40,
+           size_text %in% c("about 2 dozen", "about 25 people") ~ 25,
+           size_text %in% c("about 20", "more than a dozen vehicles") ~ 20,
+           size_text %in% 
+             c("a small group", "handful", "several", "a handful", "small group", "a group", 
+               "a group of people", "a small crowd", "several people", "small crowd", "smaller group", 
+               "a few", "a small gathering", "about a dozen", "group", "small", "10 or so", "10 to 15", 
+               "a bunch", "a cluster", "a few supporters", "about a handful") ~ 10,
+           TRUE ~ NA_real_
+         ),
+         avg_estimate=case_when(
+           !is.na(size_mean) ~ size_mean,
+           !is.na(size_high) & !is.na(size_low) ~ (size_high+size_low)/2,
+           !is.na(size_high) ~ size_high,
+           !is.na(size_low) ~ size_low,
+           !is.na(size_text_number) ~ size_text_number,
+           TRUE ~ NA_real_
+         )
+         ) %>%
+  dplyr::select(date, year, month,
+         post_gf, 
+         fips, state, county, resolved_locality, 
+         blm, lockdown,
+         avg_estimate, size_mean, size_high, size_low, size_text_number, size_text,
+         type, actors, claims, issues, lat, lon)
+```
+
+
+### Creating CBSA Level of CCC
+
+```{r}
+library(sf)
+
+cbsa <- st_read(
+  dsn = paste0(data_folder, "cb_2020_us_cbsa_500k"), 
+  layer = "cb_2020_us_cbsa_500k",
+  stringsAsFactors = FALSE) 
+
+ccc_geo <- ccc_clean %>%  
+  filter(!is.na(lat) & !is.na(lon)) %>% 
+  st_as_sf(coords = c("lon", "lat")) %>%
+  st_set_crs(4326) %>%
+  st_transform(4269)
+
+ccc_cbsa <- st_join(ccc_geo, cbsa) %>%
+  mutate(fips=str_pad(fips, 5, "left", "0")) %>%
+  left_join(xw, by=c("fips"="fipscounty")) %>%
+  mutate(GEOID=if_else(!is.na(cbsacode), str_pad(cbsacode, 5, "left", "0"), GEOID))
+```
+
+## Aggregate CCC
+
+Summarize to CBSA level
+
+```{r}
+ccc_cbsa <- ccc_cbsa %>%
+  filter(post_gf==1 & year==2020 & month %in% c(5, 6, 7, 8) & !is.na(GEOID)) %>%
+  group_by(GEOID) %>%
+  summarize(
+    actions=n(),
+    blm_actions=sum(blm, na.rm=T),
+    attendees=sum(avg_estimate, na.rm=T),
+    blm_attendees=sum(avg_estimate*blm, na.rm=T),
+    lockdown_actions=sum(lockdown, na.rm=T),
+    lockdown_attendees=sum(avg_estimate*lockdown, na.rm=T)
+  ) %>%
+  ungroup() %>%
+  mutate(nonblm_actions=actions-blm_actions, 
+         nonblm_attendees=attendees-blm_attendees
+  ) %>%
+  full_join(
+    ccc_cbsa_xw %>% 
+    filter(post_gf==0 & year<2020) %>%
+    group_by(GEOID) %>%
+    summarize(
+      old_actions=n(),
+      old_blm_actions=sum(blm, na.rm=T),
+      old_attendees=sum(avg_estimate, na.rm=T),
+      old_blm_attendees=sum(avg_estimate*blm, na.rm=T)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      old_nonblm_actions=old_actions-old_blm_actions,
+      old_nonblm_attendees=old_attendees-old_blm_attendees
+    ) %>%
+    dplyr::select(GEOID, old_blm_actions, old_nonblm_actions, old_blm_attendees, old_nonblm_attendees),
+  by="GEOID"
+  )
+```
+
+Join CCC outcome data to CBSA dataset
+
+```{r}
+cbsa_df <- cbsa_df %>% 
+  left_join(ccc_cbsa, by=c("Geo_CBSA"="GEOID")) %>%
+  # fill in missing with 0, since no records of them
+  mutate_at(vars(actions, blm_actions, attendees, blm_attendees, 
+                 lockdown_actions, lockdown_attendees, nonblm_actions, nonblm_attendees, 
+                 old_blm_actions, old_nonblm_actions, 
+                 old_blm_attendees, old_nonblm_attendees), 
+            ~if_else(is.na(.), 0, .))
+```
+
+
+## Employment
+
+From Chetty et al. Economic Opportunity Insights Tracker Data 8/18/21.
+
+```{r}
+emp <- read_csv(paste0(data_folder, "Employment - County - Daily.csv")) %>% 
+  mutate(date=ymd(paste(year, month, day, sep="-")),
+         countyfips=str_pad(countyfips, 5, "left", "0"),
+         post_gf=date >= start_protest,
+         emp=if_else(emp==".", NA_real_, as.double(.))
+         ) %>%
+  left_join(xw, by=c("countyfips"="fipscounty")) %>%
+  group_by(cbsacode, cbsatitle, year, month, post_gf) %>%
+  summarize(emp=mean(emp, na.rm=T)) %>%
+  ungroup() %>% 
+  filter(!is.nan(emp) & month==5 & year==2020 & post_gf==F) %>%
+  dplyr::select(cbsacode, emp)
+
+# join
+cbsa_df <- cbsa_df %>% 
+  left_join(emp, by=c("Geo_CBSA"="cbsacode"))
+```
+
+
+# NYT Covid
+
+NYT publishes their county-level data, available here: https://github.com/nytimes/covid-19-data. Downloaded on 08/18/2021
+
+```{r}
+nyt_covid <- read_csv(paste0(data_folder, "nyt-covid-counties.csv")) %>%
+  mutate(date=ymd(date),
+         post_gf=date >= start_protest,
+         fips=str_pad(fips, 5, "left", "0"),
+         fips=if_else(is.na(fips),
+                      case_when(
+                        county=="New York City" ~ "36061",
+                        county=="Joplin" ~ "37592",
+                        county=="Kansas City" ~ "38000",
+                        TRUE ~ NA_character_
+                      ), 
+                      fips)
+         )
+
+# aggregate
+covid <- nyt_covid %>%
+  filter(!is.na(fips) & post_gf==F) %>%
+  left_join(xw, by=c("fips"="fipscounty")) %>%
+  group_by(cbsacode) %>%
+  summarize(
+    covid_cases=sum(cases, na.rm=T),
+    covid_deaths=sum(deaths, na.rm=T)
+  ) %>%
+  ungroup()
+
+# join
+cbsa_df <- cbsa_df %>% 
+  left_join(covid, by=c("Geo_CBSA"="cbsacode")) %>%
+  mutate_at(vars(covid_cases, covid_deaths), ~if_else(is.na(.), 0, .))
+```
+
+## Covariates
+
+#### Police killings 
+
+```{r}
+clean_name <- function(df, col) {
+  col <- enquo(col)
+  df <- df %>%
+    mutate(!!col:=str_to_title(!!col),
+           !!col:=if_else(str_detect(!!col, "Juneau"), "Juneau", 
+                         if_else(str_detect(!!col, "Anchorage"), "Anchorage", !!col)),
+           !!col:=str_replace_all(!!col, fixed("."), ""),
+           !!col:=str_replace_all(!!col, fixed("-"), " "),
+           !!col:=case_when(
+             str_detect(!!col, " County") ~ str_match(!!col, "(.*) County")[,2],
+             str_detect(!!col, " City And Borough") ~ 
+               str_match(!!col, "(.*) City And Borough")[,2],
+             str_detect(!!col, " Borough") ~ str_match(!!col, "(.*) Borough")[,2],
+             str_detect(!!col, " Census Area") ~ str_match(!!col, "(.*) Census Area")[,2],
+             str_detect(!!col, " City") ~ str_match(!!col, "(.*) City")[,2],
+             str_detect(!!col, " Municipality") ~ str_match(!!col, "(.*) Municipality")[,2],
+             TRUE ~ !!col),
+           !!col:=str_replace_all(!!col, "Saint ", "St ")
+           )
+  df
+}
+```
+
+```{r}
+county_fips <- read_csv(paste0(data_folder, "lookups/county_fips_master.csv"),
+                        col_types=cols(.default="c")) %>%
+  dplyr::select(fips, county=county_name, state=state_abbr) %>%
+  clean_name(county) %>%
+  mutate(county=if_else(fips=="35013", "Dona Ana", county),
+         fips=if_else(nchar(fips)==4, paste0("0", fips), fips)) %>%
+  dplyr::select(fips, county, state) %>%
+  filter(!is.na(fips)) %>%
+  distinct()
+```
+
+Downloaded from mappingpoliceviolence.org on 8/18/2021.
+
+```{r}
+mpv <- read_csv(paste0(data_folder, "mpv.csv"))
+
+# Limit to since 2017
+mpv_clean <- mpv %>%
+  rename(state=State, county=County) %>%
+  mutate(date=mdy(`Date of Incident (month/day/year)`),
+         year=year(date), 
+         post_gf=date >= start_protest,
+         race_black=if_else(`Victim's race`=="Black", 1, 0, missing=0)
+         ) %>%
+  filter(!is.na(county)) %>%
+  clean_name(county) %>%
+  mutate(state=if_else(county=="District Of Columbia", "DC", state),
+         county=case_when(
+           county=="Doña Ana" ~ "Dona Ana",
+           county=="Brooklyn" & state=="NY" ~ "Kings",
+           county=="Manhattan" & state=="NY" ~ "New York",
+           T ~ county
+         )) %>%
+  mutate(event_id=row_number()) %>%
+  left_join(county_fips %>% filter(!is.na(fips)), by=c("state", "county")) %>%
+  filter(!is.na(fips)) %>%
+  group_by(event_id) %>%
+  mutate(n_repeats=n()) %>%
+  ungroup() %>%
+  mutate(event_prop=1/n_repeats)
+
+mpv_cbsa <- mpv_clean %>%
+  left_join(xw, by=c("fips"="fipscounty")) %>%
+  filter(post_gf==F) %>%
+  group_by(cbsacode, year) %>%
+  summarize(
+    killed=sum(event_prop, na.rm=T),
+    killed_black=sum(race_black*event_prop, na.rm=T)
+  ) %>%
+  ungroup() %>%
+  mutate(years_pre_2020=2021-year, # time decay
+         killed=killed/years_pre_2020,
+         killed_black=killed_black/years_pre_2020
+         ) %>%
+  group_by(cbsacode) %>%
+  summarize(
+    killed=sum(killed, na.rm=T),
+    killed_black=sum(killed_black, na.rm=T)
+  ) %>% 
+  ungroup()
+ 
+# join
+cbsa_df <- cbsa_df %>% 
+  left_join(mpv_cbsa, by=c("Geo_CBSA"="cbsacode")) %>%
+  mutate_at(vars(killed, killed_black), ~if_else(is.na(.), 0, .))
+```
+
+
+## Votes for Trump
+
+Downloaded from: https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/VOQCHQ
+
+```{r}
+votes <- read_csv(paste0(data_folder, "countypres_2000-2020.csv"))
+
+trump_votes <- votes %>%
+  filter(year==2016 & candidate=="DONALD TRUMP") %>%
+  dplyr::select(county_fips, candidatevotes, totalvotes) %>%
+  mutate(county_fips=str_pad(county_fips, 5, "left", "0"))
+
+# aggregate
+trump_cbsa <- trump_votes %>%
+  left_join(xw %>% dplyr::select(cbsacode, fipscounty), by=c("county_fips"="fipscounty")) %>%
+  group_by(cbsacode) %>%
+  summarize(candidatevotes=sum(candidatevotes, na.rm=T), totalvotes=sum(totalvotes, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(trump_pct=100*(candidatevotes/totalvotes))
+
+# join
+cbsa_df <- cbsa_df %>%
+  left_join(trump_cbsa %>% dplyr::select(cbsacode, trump_pct), by=c("Geo_CBSA"="cbsacode"))
+```
+
+## Create Model Variables
+
+```{r}
+model_df <- cbsa_df %>%
+  mutate(
+    # Y actions
+    any_actions=if_else(actions>0, 1, 0),
+    any_blm_actions=if_else(blm_actions>0, 1, 0),
+    any_lockdown_actions=if_else(lockdown_actions>0, 1, 0),
+    any_nonblm_actions=if_else(nonblm_actions>0, 1, 0, missing=0),
+    # Y pop scaled
+    attendees_p10k=(attendees/total_pop)*10000,
+    blm_attendees_p10k=(blm_attendees/total_pop)*10000,
+    lockdown_attendees_p10k=(lockdown_attendees/total_pop)*10000,
+    nonblm_attendees_p10k=(nonblm_attendees/total_pop)*10000,
+    # logged per 10k
+    log_blm=log(blm_attendees_p10k+1),
+    log_lockdown=log(lockdown_attendees_p10k+1),
+    log_nonblm=log(nonblm_attendees_p10k + 1),
+    # X - REVERSE CODE CHETTY (DECREASE EMP=POSITIVE #)
+    emp_scaled=(emp*100)*-1,
+    # COVID
+    covid_cases_p10k=(covid_cases/total_pop)*10000,
+    covid_deaths_p10k=(covid_deaths/total_pop)*10000,
+    # COVARS
+    any_old_actions=if_else(old_blm_actions>0, 1, 0, missing=0),
+    any_old_nonblm_actions=if_else(old_nonblm_actions>0, 1, 0, missing=0),
+    pop_1k=total_pop/1000,
+    density_1k=pop_density/1000,
+    covid_deaths_1k=covid_deaths/1000,
+    covid_cases_1k=covid_cases/1000
+  ) 
+```
+
+```{r}
+write_csv(model_df, paste0(out_folder, "model_df.csv"))
+```
+
+Filter to only areas where there is employment loss data available
+
+```{r}
+filter_df <- model_df %>%
+  filter(!is.na(emp_scaled))
+```
+
+
+```{r}
+write.csv(filter_df, paste0(out_folder, "filter_df.csv"))
+```
+
+
